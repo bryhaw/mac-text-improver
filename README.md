@@ -1,6 +1,6 @@
 # Mac Text Improver (Copilot Proofreader)
 
-A native macOS menu-bar app that checks your spelling and grammar with **GitHub Copilot**, in any app, before you hit send.
+A native macOS menu-bar app that checks your spelling and grammar with AI, in any app, before you hit send. It uses **GitHub Copilot** by default, or your own **OpenAI** or **Anthropic** API key.
 
 Press **⌃⌘S** while you type in Slack, Teams, Outlook, Messages, a browser, or anywhere else. A small panel shows the suggested fixes: deletions in red, additions in green. Press **Return** to put the corrected text back in place. A typical check takes about 2 seconds.
 
@@ -31,7 +31,9 @@ In the preview panel:
 - macOS 13 (Ventura) or later, on Apple silicon or Intel
 - Xcode Command Line Tools, for `swiftc`: `xcode-select --install`
 - Node.js 20 or later, e.g. `brew install node`
-- A GitHub account with an active **GitHub Copilot** subscription
+- One of these:
+  - a GitHub account with an active **GitHub Copilot** subscription (the default), or
+  - an **OpenAI** or **Anthropic** API key
 
 ## Getting started
 
@@ -47,30 +49,50 @@ In the preview panel:
 
 2. **Grant Accessibility permission.** The app needs it to copy your text and paste the fix back. When prompted, open **System Settings → Privacy & Security → Accessibility** and turn on **Copilot Proofreader**.
 
-3. **Sign in to GitHub Copilot.** The app reuses an existing Copilot sign-in on your Mac, for example from the Copilot CLI. If none is found, it opens your browser to sign in on first use.
+3. **Connect a provider.**
+   - **GitHub Copilot (default):** the app reuses an existing Copilot sign-in on your Mac, for example from the Copilot CLI. If none is found, it opens your browser to sign in on first use.
+   - **OpenAI or Anthropic:** choose **Provider → OpenAI** or **Provider → Anthropic** from the menu-bar icon and paste your API key. See [Providers](#providers).
 
 4. **Try it.** Type something like `i think their going to be late to the meeting tommorow` in any text box. Press **⌃⌘S**, then **Return**.
 
 Optional: choose **Open at Login** from the menu-bar icon.
 
+## Providers
+
+| Provider | What you need | Billing |
+| --- | --- | --- |
+| **GitHub Copilot** (default) | A Copilot subscription | Your Copilot plan |
+| **OpenAI** | An API key from [platform.openai.com/api-keys](https://platform.openai.com/api-keys) | Your OpenAI API account, pay per use |
+| **Anthropic** | An API key from [console.anthropic.com/settings/keys](https://console.anthropic.com/settings/keys) | Your Anthropic API account, pay per use |
+
+- Switch providers from **Provider** in the menu. When you pick OpenAI or Anthropic for the first time, the app asks for a key and checks it straight away.
+- To replace or remove a key, choose **Provider → OpenAI API Key…** or **Anthropic API Key…**.
+- Keys are stored only in your **macOS Keychain**, under "Copilot Proofreader API Keys". They're never written to disk, logs, or this repo.
+- ChatGPT Plus and Claude Pro/Max subscriptions aren't supported. Those plans don't include API access; you need an API key.
+- After a rebuild with a different signing certificate, macOS may ask whether the app can read its Keychain item. Choose **Always Allow**.
+
 ## Menu-bar options
 
-- **Model:**
-  - GPT-6 Luna is the default: fast and low cost.
-  - MAI Code 2 Flash is free.
-  - Claude Sonnet is the most thorough.
+- **Provider:** GitHub Copilot, OpenAI, or Anthropic, plus key management.
+- **Model:** lists the models your provider offers. A fast, low-cost model is picked by default:
+  - On Copilot, GPT-6 Luna is the default. MAI Code 2 Flash is free, and Claude Sonnet is the most thorough.
+  - On OpenAI and Anthropic, the list comes from your account. **Custom Model ID…** lets you enter any model ID.
 - **Shortcut:** ⌃⌘S (default), ⌃⌥S, ⌃⌘E, or ⌃⌥G. Improve Wording always adds ⇧ to the shortcut you choose.
 - **Show Changes Before Replacing:** turn this off to replace your text immediately.
 - **Open at Login**
-- **Restart Copilot Helper**
+- **Restart Helper**
 
 ## Privacy
 
-- Text is sent only when you press the shortcut, and only to GitHub Copilot through the official SDK.
-- Each check runs in a fresh session with no tools, no MCP servers, and no saved history. Your draft is treated as text to fix, not as instructions.
+- Text is sent only when you press the shortcut, and only to the provider you selected:
+  - GitHub Copilot, through the official SDK, or
+  - `api.openai.com` / `api.anthropic.com`, directly over HTTPS.
+- Each check is a single, stateless request with no tools and no saved history. Your draft is treated as text to fix, not as instructions.
+- Your provider's own data policies apply. API requests aren't used for training by default on OpenAI or Anthropic.
 - Nothing you type is stored or logged. The diagnostic log records only steps and character counts.
 - Password and other secure fields can't be read.
-- No tokens or secrets are stored in this repo. Authentication is handled by the Copilot SDK's own sign-in.
+- API keys live only in the macOS Keychain. The app passes them to the helper over a private pipe, never through environment variables, arguments, or files.
+- No tokens or secrets are stored in this repo. Copilot authentication is handled by the Copilot SDK's own sign-in.
 
 ## How it works
 
@@ -83,10 +105,12 @@ app/      Native Swift/AppKit menu-bar app (no Xcode project needed)
     ProofPanel.swift    floating preview panel with the word-level diff
     Diff.swift          word-level LCS diff
     HelperClient.swift  talks to the Node helper over line-delimited JSON
-    Settings.swift      model choices, shortcut presets, preferences
+    Settings.swift      providers, model choices, shortcut presets, preferences
+    Keychain.swift      stores OpenAI/Anthropic API keys in the macOS Keychain
   make-icon.swift       renders the app icon at build time
-helper/   Node process that calls Copilot via @github/copilot-sdk
-  proofread-helper.mjs  stdin/stdout JSON bridge, Copilot session handling
+helper/   Node process that calls the selected provider
+  proofread-helper.mjs  stdin/stdout JSON bridge, provider routing, Copilot sessions
+  providers.mjs         OpenAI and Anthropic API clients and model listing
   proofread-core.mjs    prompts, output cleanup, and validation
 build.sh  build, sign, bundle the helper, install to ~/Applications
 ```
@@ -105,10 +129,18 @@ build.sh  build, sign, bundle the helper, install to ~/Applications
 ## Development
 
 ```bash
-cd helper && npm test   # helper unit tests
+cd helper && npm test   # helper unit tests (network is mocked; no keys needed)
 ```
 
-- To preview the panel layout without calling Copilot, run `PROOFREADER_DEMO=preview "$HOME/Applications/Copilot Proofreader.app/Contents/MacOS/Copilot Proofreader"`.
+This is a **public repository**. Read [AGENTS.md](AGENTS.md) before contributing. Enable the secret guard once per clone:
+
+```bash
+git config core.hooksPath .githooks   # runs scripts/check-secrets.sh on every commit
+```
+
+CI runs the same check on every push and pull request.
+
+- To preview the panel layout without calling a provider, run `open -n --env PROOFREADER_DEMO=preview "$HOME/Applications/Copilot Proofreader.app"`. Use `PROOFREADER_DEMO=apikey` to show the API key dialog.
 - The app log is at `~/Library/Logs/Copilot Proofreader.log`.
 - Copilot runtime logs are in `~/Library/Application Support/Copilot Proofreader/copilot/logs`.
 
@@ -118,4 +150,6 @@ cd helper && npm test   # helper unit tests
   - Make sure Copilot Proofreader is turned on under Accessibility. After a rebuild with a different signature, remove it and add it again.
   - Make sure no other app uses the same shortcut. Pick another from the menu.
 - **"Couldn't read any text":** click into the text field first. Some apps block synthetic copy and paste.
-- **Sign-in or helper errors:** choose **Restart Copilot Helper** from the menu, then check the logs above.
+- **Sign-in or helper errors:** choose **Restart Helper** from the menu, then check the logs above.
+- **"Rejected your API key":** choose **Update Key** in the error, or **Provider → OpenAI API Key…** / **Anthropic API Key…**. Check that the key is active and that the account has billing set up.
+- **"Doesn't recognize the model":** pick another model from **Model**, or enter one with **Custom Model ID…**.

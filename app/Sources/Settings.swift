@@ -44,6 +44,55 @@ struct HotkeyPreset: Equatable {
     var keyEquivalent: String { keyLabel.lowercased() }
 }
 
+/// Where proofreading requests go. Copilot uses your GitHub sign-in; the others use your own API key.
+enum Provider: String, CaseIterable {
+    case copilot
+    case openai
+    case anthropic
+
+    var name: String {
+        switch self {
+        case .copilot: return "GitHub Copilot"
+        case .openai: return "OpenAI"
+        case .anthropic: return "Anthropic"
+        }
+    }
+
+    var menuTitle: String {
+        switch self {
+        case .copilot: return "GitHub Copilot (your subscription)"
+        case .openai: return "OpenAI (API key)"
+        case .anthropic: return "Anthropic Claude (API key)"
+        }
+    }
+
+    var usesAPIKey: Bool { self != .copilot }
+
+    var apiHost: String {
+        switch self {
+        case .copilot: return "GitHub Copilot"
+        case .openai: return "api.openai.com"
+        case .anthropic: return "api.anthropic.com"
+        }
+    }
+
+    var keyPageURL: URL? {
+        switch self {
+        case .copilot: return nil
+        case .openai: return URL(string: "https://platform.openai.com/api-keys")
+        case .anthropic: return URL(string: "https://console.anthropic.com/settings/keys")
+        }
+    }
+
+    var keyPlaceholder: String {
+        switch self {
+        case .copilot: return ""
+        case .openai: return "sk-…"
+        case .anthropic: return "sk-ant-…"
+        }
+    }
+}
+
 struct ModelChoice {
     let id: String
     let label: String
@@ -60,9 +109,22 @@ struct ModelChoice {
 enum Settings {
     private static let defaults = UserDefaults.standard
 
-    static var model: String? {
-        get { defaults.string(forKey: "model") }
-        set { defaults.set(newValue, forKey: "model") }
+    // Only non-secret preferences live in UserDefaults. API keys are stored in the Keychain (see Keychain.swift).
+    static var provider: Provider {
+        get { Provider(rawValue: defaults.string(forKey: "provider") ?? "") ?? .copilot }
+        set { defaults.set(newValue.rawValue, forKey: "provider") }
+    }
+
+    private static func modelKey(_ provider: Provider) -> String {
+        provider == .copilot ? "model" : "model.\(provider.rawValue)"
+    }
+
+    static func model(for provider: Provider) -> String? {
+        defaults.string(forKey: modelKey(provider))
+    }
+
+    static func setModel(_ id: String?, for provider: Provider) {
+        defaults.set(id, forKey: modelKey(provider))
     }
 
     static var previewBeforeReplace: Bool {

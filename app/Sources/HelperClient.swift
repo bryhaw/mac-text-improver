@@ -9,6 +9,7 @@ enum HelperState: Equatable {
     case starting
     case ready(login: String?)
     case signedOut(message: String?)
+    case needsKey(message: String?)
     case failed(message: String)
 }
 
@@ -24,11 +25,13 @@ struct CheckResult {
     let milliseconds: Int
 }
 
-/// Owns the Node helper process that talks to GitHub Copilot through the Copilot SDK.
+/// Owns the Node helper process that sends text to the selected provider:
+/// GitHub Copilot (through the Copilot SDK) or OpenAI / Anthropic (with the user's API key).
 final class HelperClient {
     private(set) var state: HelperState = .starting
     private(set) var models: [HelperModel] = []
-    private(set) var model: String = Settings.model ?? "gpt-6-luna"
+    private(set) var provider: Provider = Settings.provider
+    private(set) var model: String = Settings.model(for: Settings.provider) ?? ""
 
     var onStateChange: (() -> Void)?
     var onLoginURL: ((URL) -> Void)?
@@ -60,7 +63,7 @@ final class HelperClient {
         stopping = true
         process?.terminationHandler = nil
         if let process, process.isRunning { process.terminate() }
-        failPending(HelperError(code: "failed", message: "Copilot helper restarted."))
+        failPending(HelperError(code: "failed", message: "The proofreading helper restarted."))
         stopping = false
         launch()
     }
@@ -81,9 +84,37 @@ final class HelperClient {
 
     func setModel(_ id: String) {
         model = id
-        Settings.model = id
+        Settings.setModel(id, for: provider)
         write(["type": "set_model", "model": id])
         onStateChange?()
+    }
+
+    func setProvider(_ newProvider: Provider) {
+        provider = newProvider
+        Settings.provider = newProvider
+        model = Settings.model(for: newProvider) ?? ""
+        models = []
+        setState(.starting)
+        sendConfiguration()
+    }
+
+    /// Re-sends the provider settings, e.g. after the user saves or removes an API key.
+    func reloadConfiguration() {
+        setState(.starting)
+        sendConfiguration()
+    }
+
+    /// The API key travels to the helper over its private stdin pipe, never via arguments or environment.
+    private func sendConfiguration() {
+        var message: [String: Any] = [
+            "type": "configure",
+            "provider": provider.rawValue,
+            "model": Settings.model(for: provider) ?? NSNull(),
+        ]
+        if provider.usesAPIKey {
+            message["apiKey"] = Keychain.apiKey(for: provider) ?? NSNull()
+        }
+        write(message)
     }
 
     func login() {
@@ -112,7 +143,8 @@ final class HelperClient {
         process.currentDirectoryURL = script.deletingLastPathComponent()
         var env = ProcessInfo.processInfo.environment
         env["PATH"] = [node.deletingLastPathComponent().path, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")
-        if let model = Settings.model { env["PROOFREADER_MODEL"] = model }
+        env["PROOFREADER_PROVIDER"] = provider.rawValue
+        if let model = Settings.model(for: provider) { env["PROOFREADER_MODEL"] = model } else { env.removeValue(forKey: "PROOFREADER_MODEL") }
         process.environment = env
 
         let inPipe = Pipe()
@@ -146,8 +178,9 @@ final class HelperClient {
             self.stdin = inPipe.fileHandleForWriting
             buffer.removeAll()
             setState(.starting)
+            sendConfiguration()
         } catch {
-            setState(.failed(message: "Couldn't start the Copilot helper: \(error.localizedDescription)"))
+            setState(.failed(message: "Couldn't start the proofreading helper: \(error.localizedDescription)"))
         }
     }
 
@@ -155,10 +188,10 @@ final class HelperClient {
         guard proc === process else { return }
         process = nil
         stdin = nil
-        failPending(HelperError(code: "failed", message: "The Copilot helper stopped unexpectedly."))
+        failPending(HelperError(code: "failed", message: "The proofreading helper stopped unexpectedly."))
         guard !stopping else { return }
         let detail = stderrTail.split(separator: "\n").last.map(String.init) ?? "exit code \(proc.terminationStatus)"
-        setState(.failed(message: "Copilot helper stopped (\(detail)). Restarting…"))
+        setState(.failed(message: "Proofreading helper stopped (\(detail)). Restarting…"))
         let delay = restartDelay
         restartDelay = min(restartDelay * 2, 60)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -177,7 +210,7 @@ final class HelperClient {
         guard let stdin, let data = try? JSONSerialization.data(withJSONObject: message) else {
             if message["type"] as? String == "check", let id = message["id"] as? Int,
                let callback = pending.removeValue(forKey: id) {
-                callback(.failure(HelperError(code: "failed", message: "Copilot isn't running yet. Try again in a moment.")))
+                callback(.failure(HelperError(code: "failed", message: "The proofreading helper isn't running yet. Try again in a moment.")))
             }
             return
         }
@@ -186,7 +219,7 @@ final class HelperClient {
         } catch {
             if message["type"] as? String == "check", let id = message["id"] as? Int,
                let callback = pending.removeValue(forKey: id) {
-                callback(.failure(HelperError(code: "failed", message: "Couldn't reach the Copilot helper. Try again in a moment.")))
+                callback(.failure(HelperError(code: "failed", message: "Couldn't reach the proofreading helper. Try again in a moment.")))
             }
         }
     }
@@ -206,6 +239,8 @@ final class HelperClient {
     private func handle(_ msg: [String: Any]) {
         switch msg["type"] as? String {
         case "status":
+            // Ignore late status from a provider the user has since switched away from.
+            if let reported = msg["provider"] as? String, reported != provider.rawValue { return }
             if let list = msg["models"] as? [[String: Any]] {
                 models = list.compactMap { item in
                     guard let id = item["id"] as? String else { return nil }
@@ -219,6 +254,8 @@ final class HelperClient {
                 setState(.ready(login: msg["login"] as? String))
             case "signed_out":
                 setState(.signedOut(message: msg["message"] as? String))
+            case "needs_key":
+                setState(.needsKey(message: msg["message"] as? String))
             case "error":
                 setState(.failed(message: msg["message"] as? String ?? "Unknown error"))
             default:

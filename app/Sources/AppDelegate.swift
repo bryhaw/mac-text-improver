@@ -11,6 +11,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var activeRequest: Int?
     private var accessibilityTimer: Timer?
     private var awaitingLogin = false
+    /// Set after saving an API key, so the next status from the helper confirms or rejects it.
+    private var verifyingKey: Provider?
 
     /// State of one check, from grabbing text to replacing it.
     private struct Job {
@@ -55,7 +57,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         helper.start()
 
-        // Layout check: PROOFREADER_DEMO=preview shows a sample preview without touching any app.
+        // Layout checks: PROOFREADER_DEMO=preview shows a sample preview without touching any app;
+        // PROOFREADER_DEMO=apikey shows the API key dialog.
+        if ProcessInfo.processInfo.environment["PROOFREADER_DEMO"] == "apikey" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.promptForAPIKey(.openai) }
+        }
         if ProcessInfo.processInfo.environment["PROOFREADER_DEMO"] == "preview" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
                 self?.panel.showPreview(
@@ -88,7 +94,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func helperStateChanged() {
         Log.info("helper state=\(helper.state)")
         updateIcon()
-        if case .signedOut = helper.state, !hasPromptedSignIn, !awaitingLogin {
+        if let provider = verifyingKey, provider == helper.provider {
+            switch helper.state {
+            case .ready:
+                verifyingKey = nil
+                panel.setAnchor(nil)
+                panel.showToast("\(provider.name) API key saved — ready to check text")
+            case .needsKey(let message):
+                verifyingKey = nil
+                panel.setAnchor(nil)
+                panel.showError(message ?? "\(provider.name) didn't accept that key.", actionTitle: "Update Key") { [weak self] in
+                    self?.promptForAPIKey(provider)
+                }
+            case .failed:
+                verifyingKey = nil
+            case .starting, .signedOut:
+                break
+            }
+        }
+        if case .signedOut = helper.state, helper.provider == .copilot, !hasPromptedSignIn, !awaitingLogin {
             hasPromptedSignIn = true
             panel.setAnchor(nil)
             panel.showError("Copilot Proofreader needs to sign in to GitHub Copilot once.", actionTitle: "Sign In") { [weak self] in
@@ -102,7 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch helper.state {
         case .ready: name = "text.badge.checkmark"
         case .starting: name = "text.badge.checkmark"
-        case .signedOut, .failed: name = "text.badge.xmark"
+        case .signedOut, .needsKey, .failed: name = "text.badge.xmark"
         }
         let image = NSImage(systemSymbolName: name, accessibilityDescription: "Copilot Proofreader")
         image?.isTemplate = true
@@ -168,6 +192,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self?.signIn()
             }
             return
+        case .needsKey(let message):
+            let provider = helper.provider
+            panel.setAnchor(nil)
+            panel.showError(message ?? "Add your \(provider.name) API key to start proofreading.", actionTitle: "Add API Key") { [weak self] in
+                self?.promptForAPIKey(provider)
+            }
+            return
         case .failed(let message):
             panel.setAnchor(nil)
             panel.showError(message, actionTitle: "Restart Helper") { [weak self] in self?.helper.restart() }
@@ -216,7 +247,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .failure(let error):
                 Log.info("check failed code=\(error.code ?? "-") message=\(error.message)")
                 self.finish(job, collapse: true)
-                if error.isAuth {
+                if error.isAuth, self.helper.provider.usesAPIKey {
+                    let provider = self.helper.provider
+                    self.panel.showError(error.message, actionTitle: "Update Key") { [weak self] in self?.promptForAPIKey(provider) }
+                } else if error.isAuth {
                     self.panel.showError(error.message, actionTitle: "Sign In") { [weak self] in self?.signIn() }
                 } else {
                     self.panel.showError(error.message)
@@ -238,7 +272,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let count = TextDiff.changeCount(ops)
         Log.info("result model=\(result.model) ms=\(result.milliseconds) changes=\(count) preview=\(Settings.previewBeforeReplace)")
         let seconds = String(format: "%.1fs", Double(result.milliseconds) / 1000)
-        let detail = "\(Self.modelLabel(result.model)) · \(seconds)"
+        let detail = "\(modelLabel(result.model)) · \(seconds)"
 
         guard Settings.previewBeforeReplace else {
             Task { @MainActor in
@@ -312,8 +346,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private static func modelLabel(_ id: String) -> String {
-        ModelChoice.curated.first { $0.id == id }.map { String($0.label.split(separator: "—")[0]).trimmingCharacters(in: .whitespaces) } ?? id
+    private func modelLabel(_ id: String) -> String {
+        if helper.provider == .copilot, let choice = ModelChoice.curated.first(where: { $0.id == id }) {
+            return String(choice.label.split(separator: "—")[0]).trimmingCharacters(in: .whitespaces)
+        }
+        return helper.models.first { $0.id == id }?.name ?? id
+    }
+
+    // MARK: - Providers & API keys
+
+    private func selectProvider(_ provider: Provider) {
+        guard provider != helper.provider else { return }
+        helper.setProvider(provider)
+        if provider.usesAPIKey, !Keychain.hasAPIKey(for: provider) {
+            promptForAPIKey(provider)
+        }
+    }
+
+    private func promptForAPIKey(_ provider: Provider) {
+        guard provider.usesAPIKey else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        let hasKey = Keychain.hasAPIKey(for: provider)
+        let alert = NSAlert()
+        alert.messageText = "\(provider.name) API Key"
+        alert.informativeText = "Paste your \(provider.name) API key. It's stored only in your macOS Keychain and sent only to \(provider.apiHost) when you check text. Usage is billed to your \(provider.name) account."
+
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = hasKey ? "A key is saved — paste a new one to replace it" : provider.keyPlaceholder
+        let stack = NSStackView(frame: NSRect(x: 0, y: 0, width: 320, height: 52))
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.addArrangedSubview(field)
+        if let url = provider.keyPageURL {
+            let link = ClosureButton(title: "Get a key at \(url.host ?? url.absoluteString) ↗") { NSWorkspace.shared.open(url) }
+            link.isBordered = false
+            link.contentTintColor = .linkColor
+            stack.addArrangedSubview(link)
+        }
+        field.widthAnchor.constraint(equalToConstant: 320).isActive = true
+        alert.accessoryView = stack
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+        if hasKey { alert.addButton(withTitle: "Remove Key") }
+        alert.window.initialFirstResponder = field
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            let key = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { return }
+            let status = Keychain.setAPIKey(key, for: provider)
+            guard status == errSecSuccess else {
+                panel.setAnchor(nil)
+                panel.showError("Couldn't save the key to your Keychain (error \(status)).")
+                return
+            }
+            if helper.provider == provider {
+                verifyingKey = provider
+                helper.reloadConfiguration()
+            } else {
+                panel.setAnchor(nil)
+                panel.showToast("\(provider.name) API key saved. Choose \(provider.name) under Provider to use it.", duration: 3)
+            }
+        case .alertThirdButtonReturn:
+            Keychain.deleteAPIKey(for: provider)
+            if helper.provider == provider { helper.reloadConfiguration() }
+            panel.setAnchor(nil)
+            panel.showToast("\(provider.name) API key removed", symbolName: "trash", color: .secondaryLabelColor)
+        default:
+            break
+        }
+    }
+
+    private func promptForCustomModel() {
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.messageText = "Custom \(helper.provider.name) Model"
+        alert.informativeText = "Enter a model ID exactly as \(helper.provider.name) lists it."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.stringValue = helper.model
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Use Model")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let id = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !id.isEmpty { helper.setModel(id) }
     }
 
     // MARK: - Menu
@@ -330,16 +448,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         })
         menu.addItem(.separator())
 
+        let provider = helper.provider
+        let providerLabel = provider == .copilot ? "Copilot" : provider.name
         switch helper.state {
         case .ready(let login):
-            menu.addItem(disabled(login.map { "Copilot: signed in as \($0)" } ?? "Copilot: ready"))
+            if provider == .copilot {
+                menu.addItem(disabled(login.map { "Copilot: signed in as \($0)" } ?? "Copilot: ready"))
+            } else {
+                menu.addItem(disabled("\(provider.name): API key ready"))
+            }
         case .starting:
-            menu.addItem(disabled("Copilot: starting…"))
+            menu.addItem(disabled("\(providerLabel): starting…"))
         case .signedOut:
             menu.addItem(disabled("Copilot: not signed in"))
             menu.addItem(item("Sign In to GitHub…") { [weak self] in self?.signIn() })
+        case .needsKey:
+            menu.addItem(disabled("\(provider.name): API key needed"))
+            menu.addItem(item("Add \(provider.name) API Key…") { [weak self] in self?.promptForAPIKey(provider) })
         case .failed(let message):
-            menu.addItem(disabled("Copilot: \(message.prefix(60))"))
+            menu.addItem(disabled("\(providerLabel): \(message.prefix(60))"))
         }
         if !TextBridge.hasAccessibilityPermission {
             menu.addItem(item("Grant Accessibility Access…") { [weak self] in
@@ -350,18 +477,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
+        let providerMenu = NSMenu()
+        for option in Provider.allCases {
+            let entry = item(option.menuTitle) { [weak self] in self?.selectProvider(option) }
+            entry.state = option == provider ? .on : .off
+            providerMenu.addItem(entry)
+        }
+        providerMenu.addItem(.separator())
+        for option in Provider.allCases where option.usesAPIKey {
+            let saved = Keychain.hasAPIKey(for: option)
+            providerMenu.addItem(item("\(option.name) API Key… \(saved ? "(saved)" : "(not set)")") { [weak self] in
+                self?.promptForAPIKey(option)
+            })
+        }
+        let providerItem = NSMenuItem(title: "Provider: \(provider.name)", action: nil, keyEquivalent: "")
+        providerItem.submenu = providerMenu
+        menu.addItem(providerItem)
+
         let modelMenu = NSMenu()
         let available = Set(helper.models.map(\.id))
-        let choices = ModelChoice.curated.filter { available.isEmpty || available.contains($0.id) }
+        let choices: [ModelChoice] = provider == .copilot
+            ? ModelChoice.curated.filter { available.isEmpty || available.contains($0.id) }
+            : helper.models.map { ModelChoice(id: $0.id, label: $0.name) }
         for choice in choices {
             let entry = item(choice.label) { [weak self] in self?.helper.setModel(choice.id) }
             entry.state = helper.model == choice.id ? .on : .off
             modelMenu.addItem(entry)
         }
-        if !choices.contains(where: { $0.id == helper.model }) {
+        if !helper.model.isEmpty, !choices.contains(where: { $0.id == helper.model }) {
             let entry = disabled(helper.model)
             entry.state = .on
             modelMenu.addItem(entry)
+        }
+        if provider.usesAPIKey {
+            if !modelMenu.items.isEmpty { modelMenu.addItem(.separator()) }
+            modelMenu.addItem(item("Custom Model ID…") { [weak self] in self?.promptForCustomModel() })
         }
         let modelItem = NSMenuItem(title: "Model", action: nil, keyEquivalent: "")
         modelItem.submenu = modelMenu
@@ -391,7 +541,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(login)
 
         menu.addItem(.separator())
-        menu.addItem(item("Restart Copilot Helper") { [weak self] in self?.helper.restart() })
+        menu.addItem(item("Restart Helper") { [weak self] in self?.helper.restart() })
         menu.addItem(item("Quit Copilot Proofreader", key: "q") { NSApp.terminate(nil) })
     }
 
@@ -433,6 +583,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         entry.isEnabled = false
         return entry
     }
+}
+
+private final class ClosureButton: NSButton {
+    private var handler: (() -> Void)?
+
+    convenience init(title: String, action: @escaping () -> Void) {
+        self.init(frame: .zero)
+        self.title = title
+        handler = action
+        target = self
+        self.action = #selector(fire)
+    }
+
+    @objc private func fire() { handler?() }
 }
 
 private final class ClosureMenuItem: NSMenuItem {

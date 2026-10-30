@@ -72,7 +72,7 @@ swift "$ROOT/app/make-icon.swift" "$ICONSET" >/dev/null
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 
 mkdir -p "$APP/Contents/Resources/helper"
-cp "$ROOT/helper/package.json" "$ROOT/helper/proofread-helper.mjs" "$ROOT/helper/proofread-core.mjs" "$APP/Contents/Resources/helper/"
+cp "$ROOT/helper/package.json" "$ROOT"/helper/*.mjs "$APP/Contents/Resources/helper/"
 cp -R "$ROOT/helper/node_modules" "$APP/Contents/Resources/helper/"
 
 echo "› Signing ($SIGN_IDENTITY)"
