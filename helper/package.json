@@ -1,0 +1,14 @@
+{
+  "name": "copilot-proofreader-helper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bridges the Copilot Proofreader menu-bar app to GitHub Copilot via the Copilot SDK.",
+  "main": "proofread-helper.mjs",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "^1.0.28"
+  }
+}
