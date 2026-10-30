@@ -59,6 +59,8 @@ final class HelperClient {
         }
     }
 
+    static let requestTimeout: TimeInterval = 60
+
     func restart() {
         stopping = true
         process?.terminationHandler = nil
@@ -74,6 +76,12 @@ final class HelperClient {
         nextID += 1
         pending[id] = completion
         write(["type": "check", "id": id, "text": text, "mode": mode.rawValue])
+        // A request that never answers would leave the app busy and ignoring the hotkey.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.requestTimeout) { [weak self] in
+            guard let self, let callback = self.pending.removeValue(forKey: id) else { return }
+            self.write(["type": "cancel", "id": id])
+            callback(.failure(HelperError(code: "timeout", message: "The AI service took too long to respond. Try again.")))
+        }
         return id
     }
 

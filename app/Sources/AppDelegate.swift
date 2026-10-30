@@ -7,8 +7,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let panel = ProofPanel()
     private var statusItem: NSStatusItem!
     private var previousApp: NSRunningApplication?
-    private var busy = false
+    private var busy = false {
+        didSet { busySince = busy ? Date() : nil }
+    }
+    private var busySince: Date?
     private var activeRequest: Int?
+    /// Set while a preview waits for a decision; discards it without touching the target app.
+    private var abandonPreview: (() -> Void)?
     private var accessibilityTimer: Timer?
     private var awaitingLogin = false
     /// Set after saving an API key, so the next status from the helper confirms or rejects it.
@@ -18,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private struct Job {
         let original: String
         let selectedAll: Bool
+        let rich: RichSource?
         let snapshot: PasteboardSnapshot
         let targetApp: NSRunningApplication?
     }
@@ -87,6 +93,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
               app != .current else { return }
         previousApp = app
+        // Switching to another app while a preview is open dismisses it, so it can't linger and block the hotkey.
+        if let abandon = abandonPreview {
+            Log.info("preview dismissed: switched apps")
+            abandonPreview = nil
+            abandon()
+        }
     }
 
     private var hasPromptedSignIn = false
@@ -174,7 +186,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func startCheck(mode: Mode) {
         let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
         Log.info("hotkey mode=\(mode.rawValue) busy=\(busy) front=\(front) state=\(helper.state) ax=\(TextBridge.hasAccessibilityPermission)")
-        guard !busy else { return }
+        if busy {
+            if abandonPreview != nil, panel.isVisible, NSApp.isActive {
+                panel.bringToFront()
+                return
+            }
+            if let abandon = abandonPreview {
+                Log.info("preview dismissed: new check")
+                abandonPreview = nil
+                abandon()
+            } else if let since = busySince, Date().timeIntervalSince(since) > HelperClient.requestTimeout + 15 {
+                Log.info("recovered from stuck busy state")
+                if let id = activeRequest { helper.cancel(id) }
+                activeRequest = nil
+                panel.close()
+                busy = false
+            } else {
+                return
+            }
+        }
         guard TextBridge.hasAccessibilityPermission else {
             panel.setAnchor(nil)
             panel.showError("Copilot Proofreader needs Accessibility access to read and replace the text you're typing.",
@@ -221,12 +251,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 self.panel.showError("Couldn't read any text. Click into a text field (or select some text) and try again. Password fields can't be read.")
                 return
             }
-            let job = Job(original: grabbed.text, selectedAll: grabbed.selectedAll, snapshot: snapshot, targetApp: target)
+            let job = Job(original: grabbed.text, selectedAll: grabbed.selectedAll, rich: grabbed.rich, snapshot: snapshot, targetApp: target)
             self.runCheck(job, mode: mode)
         }
     }
 
     private func runCheck(_ job: Job, mode: Mode) {
+        busySince = Date()
         let text = job.original
         if text.count > 12_000 {
             finish(job, collapse: true)
@@ -262,7 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func handle(_ result: CheckResult, for job: Job, mode: Mode) {
-        let corrected = result.text
+        let corrected = TextDiff.preservingLayout(original: job.original, corrected: result.text)
         if corrected == job.original {
             finish(job, collapse: true)
             panel.showToast(mode == .fix ? "Looks good — no changes needed" : "No wording changes suggested")
@@ -270,14 +301,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let ops = TextDiff.diff(job.original, corrected)
         let count = TextDiff.changeCount(ops)
-        Log.info("result model=\(result.model) ms=\(result.milliseconds) changes=\(count) preview=\(Settings.previewBeforeReplace)")
+        let rich = RichPatch.payload(for: job.rich, original: job.original, corrected: corrected)
+        let format = job.rich.map { rich == nil ? "\($0.kind)->plain" : $0.kind } ?? "plain"
+        Log.info("result model=\(result.model) ms=\(result.milliseconds) changes=\(count) format=\(format) preview=\(Settings.previewBeforeReplace)")
         let seconds = String(format: "%.1fs", Double(result.milliseconds) / 1000)
         let detail = "\(modelLabel(result.model)) · \(seconds)"
 
         guard Settings.previewBeforeReplace else {
             Task { @MainActor in
                 self.panel.close()
-                await TextBridge.paste(corrected, restoring: job.snapshot)
+                await TextBridge.paste(corrected, rich: rich, restoring: job.snapshot)
                 self.busy = false
                 self.panel.showToast(count == 1 ? "Fixed 1 issue" : "Fixed \(count) issues",
                                      detail: TextDiff.attributed(ops, font: .systemFont(ofSize: 12)), duration: 3)
@@ -286,12 +319,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let note = job.selectedAll ? "Checked the whole field because no text was selected." : nil
+        abandonPreview = { [weak self] in
+            self?.panel.close()
+            self?.finish(job, collapse: false)
+        }
         panel.showPreview(
             original: job.original, corrected: corrected, detail: detail, note: note, polishAvailable: mode == .fix,
-            onReplace: { [weak self] in self?.replace(job, with: corrected) },
+            onReplace: { [weak self] in
+                self?.abandonPreview = nil
+                self?.replace(job, with: corrected, rich: rich)
+            },
             onCopy: { [weak self] in
                 guard let self else { return }
-                TextBridge.copyToClipboard(corrected)
+                self.abandonPreview = nil
+                TextBridge.copyToClipboard(corrected, rich: rich)
                 self.panel.close()
                 self.returnFocus(to: job) {
                     self.panel.showToast("Copied corrected text")
@@ -299,23 +340,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             },
             onPolish: { [weak self] in
                 guard let self else { return }
+                self.abandonPreview = nil
                 self.returnFocus(to: job, collapse: false) {
                     self.runCheck(job, mode: .polish)
                 }
             },
             onCancel: { [weak self] in
                 guard let self else { return }
+                self.abandonPreview = nil
                 self.panel.close()
                 self.returnFocus(to: job) {}
             })
     }
 
-    private func replace(_ job: Job, with text: String) {
+    private func replace(_ job: Job, with text: String, rich: RichPayload?) {
         panel.close()
         returnFocus(to: job, collapse: false) {
             Task { @MainActor in
                 Log.info("replace front=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?")")
-                await TextBridge.paste(text, restoring: job.snapshot)
+                await TextBridge.paste(text, rich: rich, restoring: job.snapshot)
                 self.busy = false
             }
         }

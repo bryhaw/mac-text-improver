@@ -34,6 +34,8 @@ struct GrabbedText {
     let text: String
     /// True when nothing was selected and the whole field was selected for the user.
     let selectedAll: Bool
+    /// Formatted copy of the same content (HTML or RTF), used to keep images, links, and styling on replace.
+    let rich: RichSource?
 }
 
 enum TextBridge {
@@ -64,25 +66,27 @@ enum TextBridge {
         var baseline = pasteboard.changeCount
 
         sendShortcut(UInt16(kVK_ANSI_C))
-        if let text = await waitForText(after: baseline), !text.isEmpty {
-            return GrabbedText(text: text, selectedAll: false)
+        if let (text, rich) = await waitForText(after: baseline), !text.isEmpty {
+            return GrabbedText(text: text, selectedAll: false, rich: rich)
         }
 
         baseline = pasteboard.changeCount
         sendShortcut(UInt16(kVK_ANSI_A))
         try? await Task.sleep(nanoseconds: 80_000_000)
         sendShortcut(UInt16(kVK_ANSI_C))
-        if let text = await waitForText(after: baseline), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return GrabbedText(text: text, selectedAll: true)
+        if let (text, rich) = await waitForText(after: baseline), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return GrabbedText(text: text, selectedAll: true, rich: rich)
         }
         return nil
     }
 
     /// Pastes `text` over the current selection in the frontmost app, then puts the user's clipboard back.
-    static func paste(_ text: String, restoring snapshot: PasteboardSnapshot) async {
+    /// When `rich` is given, apps that accept formatted paste get it, so images and links survive.
+    static func paste(_ text: String, rich: RichPayload? = nil, restoring snapshot: PasteboardSnapshot) async {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.declareTypes([.string, transientType], owner: nil)
+        rich?.write(to: pasteboard)
         pasteboard.setString(text, forType: .string)
         pasteboard.setData(Data(), forType: transientType)
         let ours = pasteboard.changeCount
@@ -93,20 +97,22 @@ enum TextBridge {
         if pasteboard.changeCount == ours { snapshot.restore() }
     }
 
-    static func copyToClipboard(_ text: String) {
+    static func copyToClipboard(_ text: String, rich: RichPayload? = nil) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
+        rich?.write(to: pasteboard)
         pasteboard.setString(text, forType: .string)
     }
 
-    private static func waitForText(after baseline: Int, timeout: TimeInterval = 0.6) async -> String? {
+    private static func waitForText(after baseline: Int, timeout: TimeInterval = 0.6) async -> (String, RichSource?)? {
         let deadline = Date().addingTimeInterval(timeout)
         let pasteboard = NSPasteboard.general
         while Date() < deadline {
             if pasteboard.changeCount != baseline {
                 // Some apps publish the change before the string is readable.
                 try? await Task.sleep(nanoseconds: 30_000_000)
-                return pasteboard.string(forType: .string)
+                guard let text = pasteboard.string(forType: .string) else { return nil }
+                return (text, RichSource.fromPasteboard(pasteboard))
             }
             try? await Task.sleep(nanoseconds: 25_000_000)
         }

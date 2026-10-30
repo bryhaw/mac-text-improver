@@ -48,6 +48,11 @@ final class ProofPanel {
 
     var isVisible: Bool { panel.isVisible }
 
+    func bringToFront() {
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+    }
+
     func setAnchor(_ rect: NSRect?) { anchor = rect }
 
     // MARK: - States

@@ -16,6 +16,8 @@ It catches what the built-in macOS checker misses: grammar, wrong words that are
 - If you've selected text, only the selection is checked. If nothing is selected, the whole text field is checked.
 - If nothing needs fixing, a brief "Looks good" check appears.
 - Your clipboard is restored after each check.
+- Formatting is kept. Images, links, bold, and signatures stay in place, and only the words that changed are replaced. This works in web apps like Outlook on the web, Slack, and Teams, and in native apps like TextEdit and Notes. If a fix can't be placed precisely, the app falls back to pasting plain text.
+- Line breaks, blank lines, and spacing from your original are always preserved.
 
 In the preview panel:
 
@@ -103,7 +105,8 @@ app/      Native Swift/AppKit menu-bar app (no Xcode project needed)
     HotKey.swift        Carbon global hotkey registration
     TextBridge.swift    copy selection (or ⌘A⌘C), paste back, restore clipboard
     ProofPanel.swift    floating preview panel with the word-level diff
-    Diff.swift          word-level LCS diff
+    Diff.swift          word-level LCS diff; keeps the original's line breaks and spacing
+    RichText.swift      applies fixes inside copied HTML/RTF so images, links, and styles survive
     HelperClient.swift  talks to the Node helper over line-delimited JSON
     Settings.swift      providers, model choices, shortcut presets, preferences
     Keychain.swift      stores OpenAI/Anthropic API keys in the macOS Keychain
@@ -149,6 +152,7 @@ CI runs the same check on every push and pull request.
 - **The shortcut does nothing:**
   - Make sure Copilot Proofreader is turned on under Accessibility. After a rebuild with a different signature, remove it and add it again.
   - Make sure no other app uses the same shortcut. Pick another from the menu.
+  - A preview left open no longer blocks the shortcut. Switching apps dismisses the preview, and pressing the shortcut again starts a fresh check. AI requests time out after 60 seconds.
 - **"Couldn't read any text":** click into the text field first. Some apps block synthetic copy and paste.
 - **Sign-in or helper errors:** choose **Restart Helper** from the menu, then check the logs above.
 - **"Rejected your API key":** choose **Update Key** in the error, or **Provider → OpenAI API Key…** / **Anthropic API Key…**. Check that the key is active and that the account has billing set up.

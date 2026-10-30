@@ -8,16 +8,68 @@ enum DiffOp: Equatable {
 
 enum TextDiff {
     private static let tokenPattern = try! NSRegularExpression(
-        pattern: #"\s+|[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*|[^\s\p{L}\p{N}]"#)
+        pattern: #"[\s\p{Cf}\x{FFFC}]+|[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*|[^\s\p{L}\p{N}]"#)
 
     static func tokenize(_ text: String) -> [String] {
         let ns = text as NSString
-        return tokenPattern.matches(in: text, range: NSRange(location: 0, length: ns.length))
-            .map { ns.substring(with: $0.range) }
+        return tokenRanges(text).map { ns.substring(with: $0) }
+    }
+
+    static func tokenRanges(_ text: String) -> [NSRange] {
+        tokenPattern.matches(in: text, range: NSRange(location: 0, length: (text as NSString).length)).map(\.range)
     }
 
     /// Word-level diff (LCS) with consecutive edits grouped as removed-then-added.
     static func diff(_ old: String, _ new: String) -> [DiffOp] {
+        merge(tokenDiff(old, new))
+    }
+
+    /// Returns `corrected` with the original's line breaks, blank lines, and invisible characters restored.
+    /// Models tend to normalize layout (collapsing blank lines, dropping trailing or non-breaking spaces,
+    /// removing image placeholders); those aren't real fixes, so only word and punctuation edits are kept.
+    /// Plain space-for-space edits (like fixing a double space) are still accepted.
+    static func preservingLayout(original: String, corrected: String) -> String {
+        let ops = tokenDiff(original, corrected)
+        var out = ""
+        var removed: [String] = [], added: [String] = []
+        func flush() {
+            defer { removed = []; added = [] }
+            let oldLayout = removed.filter(isLayout), newLayout = added.filter(isLayout)
+            if removed.allSatisfy(isLayout), added.allSatisfy(isLayout) {
+                let plainSpaces = (removed + added).allSatisfy { $0.allSatisfy { $0 == " " } }
+                out += (plainSpaces ? added : removed).joined()
+                return
+            }
+            // Words changed too: keep the model's words but put the original layout back between them.
+            var replacements = oldLayout.count == newLayout.count ? oldLayout[...] : []
+            for token in added {
+                if isLayout(token), let original = replacements.popFirst() {
+                    let plainSpaces = (token + original).allSatisfy { $0 == " " }
+                    out += plainSpaces ? token : original
+                } else {
+                    out += token
+                }
+            }
+        }
+        for op in ops {
+            switch op {
+            case .same(let s): flush(); out += s
+            case .removed(let s): removed.append(s)
+            case .added(let s): added.append(s)
+            }
+        }
+        flush()
+        return out
+    }
+
+    /// Whitespace, or characters with no visible glyph (zero-width marks, the U+FFFC image placeholder).
+    static func isLayout(_ token: String) -> Bool {
+        !token.isEmpty && token.unicodeScalars.allSatisfy {
+            $0.properties.isWhitespace || $0.properties.generalCategory == .format || $0.value == 0xFFFC
+        }
+    }
+
+    private static func tokenDiff(_ old: String, _ new: String) -> [DiffOp] {
         let a = tokenize(old)
         let b = tokenize(new)
 
@@ -33,7 +85,7 @@ enum TextDiff {
         var ops: [DiffOp] = a[..<prefix].map { .same($0) }
         ops += middleDiff(midA, midB)
         ops += a[(a.count - suffix)...].map { .same($0) }
-        return merge(ops)
+        return ops
     }
 
     private static func middleDiff(_ a: [String], _ b: [String]) -> [DiffOp] {
