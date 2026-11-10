@@ -1,6 +1,5 @@
 import AppKit
 import Carbon.HIToolbox
-import ServiceManagement
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let helper = HelperClient()
@@ -79,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         registerHotkeys()
+        Log.info("ready ax=\(TextBridge.hasAccessibilityPermission) keepAlive=\(KeepAlive.isEnabled)")
         if !TextBridge.hasAccessibilityPermission {
             TextBridge.requestAccessibilityPermission()
             watchForAccessibilityPermission()
@@ -86,6 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        Log.now("quit pid=\(getpid())")
         helper.stop()
     }
 
@@ -580,7 +581,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(preview)
 
         let login = item("Open at Login") { [weak self] in self?.toggleLoginItem() }
-        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        login.state = KeepAlive.isEnabled ? .on : (KeepAlive.requiresApproval ? .mixed : .off)
+        login.toolTip = "Start at login and reopen automatically if it ever crashes."
         menu.addItem(login)
 
         menu.addItem(.separator())
@@ -602,11 +604,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func toggleLoginItem() {
         do {
-            if SMAppService.mainApp.status == .enabled {
-                try SMAppService.mainApp.unregister()
-            } else {
-                try SMAppService.mainApp.register()
-            }
+            try KeepAlive.setEnabled(!KeepAlive.isEnabled)
         } catch {
             panel.setAnchor(nil)
             panel.showError("Couldn't change Open at Login: \(error.localizedDescription)")

@@ -139,4 +139,10 @@ enum Settings {
         }
         set { defaults.set(newValue.id, forKey: "hotkey") }
     }
+
+    /// Set once Open at Login has been turned on by default, so turning it off later sticks.
+    static var keepRunningConfigured: Bool {
+        get { defaults.bool(forKey: "keepRunningConfigured") }
+        set { defaults.set(newValue, forKey: "keepRunningConfigured") }
+    }
 }

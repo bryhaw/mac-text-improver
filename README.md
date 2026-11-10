@@ -57,7 +57,7 @@ In the preview panel:
 
 4. **Try it.** Type something like `i think their going to be late to the meeting tommorow` in any text box. Press **⌃⌘S**, then **Return**.
 
-Optional: choose **Open at Login** from the menu-bar icon.
+The app keeps itself running: it starts when you log in and reopens automatically if it ever crashes. macOS may show a **Background Items Added** notification the first time. To turn this off, uncheck **Open at Login** in the menu.
 
 ## Providers
 
@@ -81,7 +81,7 @@ Optional: choose **Open at Login** from the menu-bar icon.
   - On OpenAI and Anthropic, the list comes from your account. **Custom Model ID…** lets you enter any model ID.
 - **Shortcut:** ⌃⌘S (default), ⌃⌥S, ⌃⌘E, or ⌃⌥G. Improve Wording always adds ⇧ to the shortcut you choose.
 - **Show Changes Before Replacing:** turn this off to replace your text immediately.
-- **Open at Login**
+- **Open at Login:** on by default. Starts the app at login and relaunches it after a crash. Choosing **Quit** stops it until you open it again or log in.
 - **Restart Helper**
 
 ## Privacy
@@ -153,6 +153,9 @@ CI runs the same check on every push and pull request.
   - Make sure Copilot Proofreader is turned on under Accessibility. After a rebuild with a different signature, remove it and add it again.
   - Make sure no other app uses the same shortcut. Pick another from the menu.
   - A preview left open no longer blocks the shortcut. Switching apps dismisses the preview, and pressing the shortcut again starts a fresh check. AI requests time out after 60 seconds.
+- **The app isn't running (no menu-bar icon):**
+  - Open it from `~/Applications`. Make sure **Open at Login** is checked, and that Copilot Proofreader is allowed under **System Settings → General → Login Items & Extensions**.
+  - Check the launch agent with `launchctl print gui/$(id -u)/com.bryhaw.copilot-proofreader.agent`. The log records each launch, quit, and crash.
 - **"Couldn't read any text":** click into the text field first. Some apps block synthetic copy and paste.
 - **Sign-in or helper errors:** choose **Restart Helper** from the menu, then check the logs above.
 - **"Rejected your API key":** choose **Update Key** in the error, or **Provider → OpenAI API Key…** / **Anthropic API Key…**. Check that the key is active and that the account has billing set up.

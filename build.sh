@@ -66,6 +66,27 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
+# Launch agent registered by the app (Open at Login): starts at login and relaunches after a crash.
+# A normal Quit exits with status 0, which KeepAlive/SuccessfulExit=false leaves stopped.
+mkdir -p "$APP/Contents/Library/LaunchAgents"
+cat > "$APP/Contents/Library/LaunchAgents/$BUNDLE_ID.agent.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$BUNDLE_ID.agent</string>
+  <key>BundleProgram</key><string>Contents/MacOS/CopilotProofreader</string>
+  <key>AssociatedBundleIdentifiers</key><array><string>$BUNDLE_ID</string></array>
+  <key>EnvironmentVariables</key><dict><key>PROOFREADER_AGENT</key><string>1</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>LimitLoadToSessionType</key><string>Aqua</string>
+</dict>
+</plist>
+PLIST
+
 ICONSET="$BUILD/AppIcon.iconset"
 rm -rf "$ICONSET"
 swift "$ROOT/app/make-icon.swift" "$ICONSET" >/dev/null
